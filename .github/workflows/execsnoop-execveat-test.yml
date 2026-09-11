@@ -43,10 +43,12 @@ jobs:
 
           int main(void)
           {
-          	char *argv[] = { "/bin/true", "EXECVEAT_MARKER", 0 };
+          	char path[] = "/bin/true";
+          	char marker[] = "EXECVEAT_MARKER";
+          	char *argv[] = { path, marker, 0 };
           	char *envp[] = { 0 };
 
-          	syscall(SYS_execveat, AT_FDCWD, "/bin/true", argv, envp, 0);
+          	syscall(SYS_execveat, AT_FDCWD, path, argv, envp, 0);
           	perror("execveat");
           	return 1;
           }
