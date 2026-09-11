@@ -1,0 +1,121 @@
+name: execsnoop execveat test
+
+on:
+  push:
+    branches: [execsnoop-execveat-ci]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm libelf-dev zlib1g-dev make gcc
+
+      - name: Show environment
+        run: |
+          uname -a
+          head -2 /etc/os-release
+          ls -la /sys/kernel/btf/vmlinux
+          clang --version | head -1
+
+      - name: Write test trigger and runner script
+        run: |
+          cat > /tmp/execveat_test.c <<'EOF'
+          #define _GNU_SOURCE
+          #include <fcntl.h>
+          #include <stdio.h>
+          #include <sys/syscall.h>
+          #include <unistd.h>
+
+          int main(void)
+          {
+          	char *argv[] = { "/bin/true", "EXECVEAT_MARKER", 0 };
+          	char *envp[] = { 0 };
+
+          	syscall(SYS_execveat, AT_FDCWD, "/bin/true", argv, envp, 0);
+          	perror("execveat");
+          	return 1;
+          }
+          EOF
+          gcc -O2 -o /tmp/execveat_test /tmp/execveat_test.c
+
+          cat > /tmp/run_test.sh <<'EOF'
+          #!/usr/bin/env bash
+          set -u
+          label=$1
+          out=/tmp/execsnoop-$label.txt
+          cd "$GITHUB_WORKSPACE/libbpf-tools"
+          sudo ./execsnoop > "$out" 2>&1 &
+          sleep 3
+          bash -c '/bin/true EXECVE_MARKER'
+          /tmp/execveat_test || true
+          sleep 2
+          sudo pkill -INT -x execsnoop
+          sleep 1
+          echo "== execsnoop output ($label) =="
+          cat "$out"
+          EOF
+          chmod +x /tmp/run_test.sh
+
+      - name: Build baseline execsnoop from upstream master
+        run: |
+          cp libbpf-tools/execsnoop.bpf.c /tmp/execsnoop.bpf.c.patched
+          git fetch -q https://github.com/iovisor/bcc master
+          git show FETCH_HEAD:libbpf-tools/execsnoop.bpf.c > libbpf-tools/execsnoop.bpf.c
+          make -C libbpf-tools -j"$(nproc)" USE_BLAZESYM=0 execsnoop
+
+      - name: Baseline must see execve and miss execveat
+        run: |
+          /tmp/run_test.sh baseline
+          grep -q EXECVE_MARKER /tmp/execsnoop-baseline.txt
+          ! grep -q EXECVEAT_MARKER /tmp/execsnoop-baseline.txt
+          echo "baseline behaves as expected: execve traced, execveat missed"
+
+      - name: Build patched execsnoop
+        run: |
+          cp /tmp/execsnoop.bpf.c.patched libbpf-tools/execsnoop.bpf.c
+          rm -f libbpf-tools/.output/execsnoop.bpf.o libbpf-tools/.output/execsnoop.skel.h libbpf-tools/.output/execsnoop.o libbpf-tools/execsnoop
+          make -C libbpf-tools -j"$(nproc)" USE_BLAZESYM=0 execsnoop
+
+      - name: Patched must see both execve and execveat
+        run: |
+          /tmp/run_test.sh patched
+          grep -q EXECVE_MARKER /tmp/execsnoop-patched.txt
+          grep -q EXECVEAT_MARKER /tmp/execsnoop-patched.txt
+          echo "patched behaves as expected: execve and execveat both traced"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### ${{ matrix.runner }} ($(uname -m), kernel $(uname -r))"
+            echo
+            echo '```'
+            echo "== baseline (upstream master) =="
+            cat /tmp/execsnoop-baseline.txt 2>/dev/null || echo "(no output)"
+            echo
+            echo "== patched =="
+            cat /tmp/execsnoop-patched.txt 2>/dev/null || echo "(no output)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: execsnoop-output-${{ matrix.runner }}
+          path: /tmp/execsnoop-*.txt
+          if-no-files-found: ignore
