@@ -1,0 +1,49 @@
+name: test program layout
+
+on:
+  push:
+    branches: [execsnoop-execveat-ci]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  layout:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Build the literal-string test program and dump its layout
+        run: |
+          cat > /tmp/rodata.c <<'EOF'
+          #define _GNU_SOURCE
+          #include <fcntl.h>
+          #include <stdio.h>
+          #include <sys/syscall.h>
+          #include <unistd.h>
+
+          int main(void)
+          {
+          	char *argv[] = { "/bin/true", "EXECVEAT_MARKER", 0 };
+          	char *envp[] = { 0 };
+
+          	syscall(SYS_execveat, AT_FDCWD, "/bin/true", argv, envp, 0);
+          	perror("execveat");
+          	return 1;
+          }
+          EOF
+          gcc -O2 -o /tmp/rodata /tmp/rodata.c
+          echo "== toolchain =="
+          uname -m
+          gcc --version | head -1
+          ld --version | head -1
+          echo "page size: $(getconf PAGESIZE)"
+          echo "== program headers =="
+          readelf -lW /tmp/rodata
+          echo "== sections of interest =="
+          readelf -SW /tmp/rodata | grep -E "\[Nr\]|\.text|\.rodata|\.eh_frame"
+          echo "== string literal addresses =="
+          objdump -s -j .rodata /tmp/rodata
